@@ -1,0 +1,13 @@
+django
+djangorestframework
+psycopg2-binary
+djangorestframework-simplejwt
+django-environ
+django-storages[boto3]
+drf-spectacular
+django-simple-history
+celery
+django-role-permissions
+pytest
+factory-boy
+mock
