@@ -11,3 +11,7 @@ django-role-permissions
 pytest
 factory-boy
 mock
+django-cors-headers
+python-dateutil
+pillow
+pytz

@@ -1,55 +1,93 @@
 from rest_framework import viewsets, status
+from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from .models import User
-from .serializers import UserSerializer, UserCreateSerializer
-from church_core.permissions import IsChurchMember
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework_simplejwt.tokens import RefreshToken
+from django.contrib.auth import login
+from .models import User, ChurchUser
+from .serializers import (
+    UserRegistrationSerializer, UserLoginSerializer, UserProfileSerializer,
+    PasswordChangeSerializer, ChurchUserSerializer
+)
 
-class UserViewSet(viewsets.ModelViewSet):
-    """
-    사용자(User)에 대한 API ViewSet
-    - 슈퍼유저는 모든 사용자 관리 가능
-    - 일반 사용자는 자신의 정보만 조회/수정 가능
-    """
-    queryset = User.objects.all()
-    serializer_class = UserSerializer
-    permission_classes = [IsAuthenticated, IsChurchMember]
 
-    def get_serializer_class(self):
-        if self.action == 'create':
-            return UserCreateSerializer
-        return UserSerializer
+class AuthViewSet(viewsets.GenericViewSet):
+    """인증 관련 API ViewSet"""
+    
+    @action(detail=False, methods=['post'], permission_classes=[AllowAny])
+    def register(self, request):
+        """사용자 등록"""
+        serializer = UserRegistrationSerializer(data=request.data)
+        if serializer.is_valid():
+            user = serializer.save()
+            refresh = RefreshToken.for_user(user)
+            return Response({
+                'user': UserProfileSerializer(user).data,
+                'tokens': {
+                    'refresh': str(refresh),
+                    'access': str(refresh.access_token),
+                }
+            }, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    @action(detail=False, methods=['post'], permission_classes=[AllowAny])
+    def login(self, request):
+        """사용자 로그인"""
+        serializer = UserLoginSerializer(data=request.data)
+        if serializer.is_valid():
+            user = serializer.validated_data['user']
+            login(request, user)
+            refresh = RefreshToken.for_user(user)
+            
+            return Response({
+                'user': UserProfileSerializer(user).data,
+                'tokens': {
+                    'refresh': str(refresh),
+                    'access': str(refresh.access_token),
+                }
+            })
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
+    def profile(self, request):
+        """사용자 프로필 조회"""
+        serializer = UserProfileSerializer(request.user)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['patch'], permission_classes=[IsAuthenticated])
+    def update_profile(self, request):
+        """사용자 프로필 수정"""
+        serializer = UserProfileSerializer(request.user, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    @action(detail=False, methods=['post'], permission_classes=[IsAuthenticated])
+    def change_password(self, request):
+        """비밀번호 변경"""
+        serializer = PasswordChangeSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            serializer.save()
+            return Response({'message': '비밀번호가 성공적으로 변경되었습니다.'})
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+
+class ChurchUserViewSet(viewsets.ModelViewSet):
+    """교회 사용자 관리 API ViewSet"""
+    serializer_class = ChurchUserSerializer
+    permission_classes = [IsAuthenticated]
+    
     def get_queryset(self):
-        # 슈퍼유저는 모든 사용자를 볼 수 있음
-        if self.request.user.is_superuser:
-            return self.queryset
-        # 일반 사용자는 자신의 교회에 속한 사용자만 볼 수 있음
-        return self.queryset.filter(church=self.request.user.church)
-
-    def retrieve(self, request, *args, **kwargs):
-        instance = self.get_object()
-        # 슈퍼유저가 아니면서 자신의 정보가 아니면 접근 불가
-        if not request.user.is_superuser and instance != request.user:
-            return Response({"detail": "접근 권한이 없습니다."}, status=status.HTTP_403_FORBIDDEN)
-        return super().retrieve(request, *args, **kwargs)
-
-    def update(self, request, *args, **kwargs):
-        instance = self.get_object()
-        # 슈퍼유저가 아니면서 자신의 정보가 아니면 수정 불가
-        if not request.user.is_superuser and instance != request.user:
-            return Response({"detail": "수정 권한이 없습니다."}, status=status.HTTP_403_FORBIDDEN)
-        return super().update(request, *args, **kwargs)
-
-    def destroy(self, request, *args, **kwargs):
-        instance = self.get_object()
-        # 슈퍼유저가 아니면서 자신의 정보가 아니면 삭제 불가
-        if not request.user.is_superuser and instance != request.user:
-            return Response({"detail": "삭제 권한이 없습니다."}, status=status.HTTP_403_FORBIDDEN)
-        return super().destroy(request, *args, **kwargs)
-
-    def create(self, request, *args, **kwargs):
-        # 사용자 생성은 슈퍼유저만 가능하도록 제한
-        if not request.user.is_superuser:
-            return Response({"detail": "사용자 생성 권한이 없습니다."}, status=status.HTTP_403_FORBIDDEN)
-        return super().create(request, *args, **kwargs)
+        user = self.request.user
+        if user.is_superuser:
+            return ChurchUser.objects.all()
+        
+        # 사용자가 속한 교회들의 ChurchUser만 조회
+        user_churches = user.church_users.values_list('church', flat=True)
+        return ChurchUser.objects.filter(church__in=user_churches)
+    
+    def perform_create(self, serializer):
+        # ChurchUser 생성 시 추가 로직
+        church_user = serializer.save()
+        # 필요시 추가 처리 로직
